@@ -6,21 +6,20 @@ on:
       cache-key:
         required: true
         type: string
+      abi:
+        required: true
+        type: string
 
 env:
+  CACHE-KEY: ${{ inputs.cache-key }}
+  TIMESTAMP: ${{ inputs.timestamp }}
+  ABI: ${{ inputs.abi }}
   REPO-OWNER: ${{ github.repository_owner }}
 
 jobs:
   e2e-test:
     name: End-to-end test
     runs-on: macos-12
-    strategy:
-      matrix:
-        include:
-          - arch: x86_64
-            api-level: 30
-    env:
-      CACHE-KEY: ${{ inputs.cache-key }}
     continue-on-error: true  #temporary while e2e is still flaky
     steps:
       - name: Set envs for zingolib CI
@@ -30,13 +29,35 @@ jobs:
       - name: Checkout repository
         uses: actions/checkout@v3
         with:
-          repository: ${{ env.REPO-OWNER }}/zingo-mobile
-        
+          repository: fluidvanadium/zingo-mobile
+      
+      - name: Set envs for x86_64
+        if: ${{ env.ABI == 'x86_64' }}
+        run: echo "AVD-ARCH=x86_64" >> $GITHUB_ENV
+
+      - name: Set envs for x86
+        if: ${{ env.ABI == 'x86' }}
+        run: echo "AVD-ARCH=x86" >> $GITHUB_ENV
+
+      - name: Set envs for arm64-v8a
+        if: ${{ env.ABI == 'arm64-v8a' }}
+        run: echo "AVD-ARCH=x86_64" >> $GITHUB_ENV
+
+      - name: Set envs for armeabi-v7a
+        if: ${{ env.ABI == 'armeabi-v7a' }}
+        run: echo "AVD-ARCH=x86" >> $GITHUB_ENV
+      
       - name: Setup Java
         uses: actions/setup-java@v3
         with:
           distribution: 'temurin'
           java-version: '11'
+      
+      - name: Setup Android SDK
+        uses: android-actions/setup-android@v2
+      
+      - name: Add emulator to PATH
+        run: echo "${ANDROID_SDK_ROOT}/emulator" >> $GITHUB_PATH
       
       - name: Gradle cache
         uses: gradle/gradle-build-action@v2
@@ -52,39 +73,32 @@ jobs:
           path: |
             ~/.android/avd/*
             ~/.android/adb*
-          key: avd-${{ matrix.arch }}-api-${{ matrix.api-level }}-e2e
+          key: avd-${{ env.AVD-ARCH }}-e2e
 
       - name: Native rust cache
         uses: actions/cache@v3
         with:
-          path: android/app/src/main/jniLibs/${{ matrix.arch }}
-          key: native-rust-${{ matrix.arch }}-${{ env.CACHE-KEY }}
+          path: android/app/src/main/jniLibs/${{ env.ABI }}
+          key: native-rust-${{ env.ABI }}-${{ env.CACHE-KEY }}
           fail-on-cache-miss: true
       
       - name: Create AVD and generate snapshot for caching
         if: steps.avd-cache.outputs.cache-hit != 'true'
-        uses: reactivecircus/android-emulator-runner@v2
+        uses: nick-fields/retry@v2
         with:
-          api-level: ${{ matrix.api-level }}
-          arch: ${{ matrix.arch }}
-          force-avd-creation: false
-          emulator-options: -no-window -gpu swiftshader_indirect -noaudio -no-boot-anim -camera-back none
-          disable-animations: false
-          script: echo "Generated AVD snapshot for caching."
-      
+          timeout_minutes: 60
+          max_attempts: 3
+          command: ./scripts/emulate_app.sh -a ${{ env.ABI }} -s
+        
+      - run: ./scripts/emulate_app.sh -a ${{ env.ABI }}
+
       - run: yarn install
-      
-      - run: nohup yarn react-native start > "yarn_react_native_start.out" &
-      
+
+      - run: nohup yarn react-native start > "react_native.out" &> /dev/null &
+
       - name: Run Detox Build
-        run: yarn detox build -c android.emu.debug -n test
+        run: yarn detox build -c android.emu.debug
       
       - name: Run Detox Test
-        uses: reactivecircus/android-emulator-runner@v2
-        with:
-          api-level: ${{ matrix.api-level }}
-          arch: ${{ matrix.arch }}
-          force-avd-creation: false
-          emulator-options: -no-snapshot-save -no-window -gpu swiftshader_indirect -noaudio -no-boot-anim -camera-back none
-          disable-animations: true
-          script: yarn detox test -c android.emu.debug -n test
+        run: yarn detox test -c android.emu.debug -n pixel_2-android-30_google_apis_playstore_${{env.AVD-ARCH}}
+      
